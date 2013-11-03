@@ -55,7 +55,7 @@
 % catchall which according to me was the intended idea.
 
 -module(controller).
--export([signal_light/1, send_mesg/2, start/0]).
+-export([send_mesg/2, start/0]).
 
 send_mesg(Pid, Message) ->
     Pid ! {self(), Message}.
@@ -92,29 +92,39 @@ signal_light(_, State) ->
 %% The controller, the muscle of this program; given the Pid of the traffic
 %% light and the Pedestrian traffic light, and their states, it recieves various
 %% messages and acts accordingly
-controller(TrafficPid, PedestrianPid, {Tstate, Pstate}) ->
+controller(TrafficPid, PedestrianPid, {Tstate, Pstate, Status}) ->
     receive
-        %% This reverts the lights to the normal state
-        {Pid, normal} ->
-            send_mesg(Pid, 'back to normal'),
-            controller(TrafficPid, PedestrianPid, {green, red});
-
         %% Here the asking Pedestrian is given a reply as to the state of the
         %% lights
         {Pid, ask} ->
             send_mesg(Pid, {Tstate, Pstate}),
-            controller(TrafficPid, PedestrianPid, {Tstate, Pstate});
+            controller(TrafficPid, PedestrianPid, {Tstate, Pstate, Status});
+
+        %% This reverts the traffic light to normal state and blocks it for the
+        %% next 10 minutes so that only vehicular traffic is allowed in the next
+        %% 10 minutes
+        {Pid, normal} ->
+            send_mesg(Pid, 'normal, pedestrian not allowed for 10'),
+            timer:send_after(10000, self(), traffic_open),
+            controller(TrafficPid, PedestrianPid, {green, red, traffic_lock});
+
+        %% This opens the traffic for any pedestrian movement
+        {Pid, traffic_open} ->
+            send_mesg(Pid, 'normal'),
+            controller(TrafficPid, PedestrianPid, {green, red, open});
 
         %% The pedestrian asks for a stop in the vehicle traffic
         {Pid, stop} ->
-            case Pstate of 
-                green -> 
-                    send_mesg(Pid, 'cannot change state');
+            case Status of 
+                traffic_lock ->
+                    send_mesg(Pid, 'cannot change state, traffic is locked');
+                request_lock ->
+                    send_mesg(Pid, 'cannot change state, already open');
                 _ ->
                     send_mesg(Pid, 'traffic light about to close in 1'),
                     timer:send_after(10000, self(), {Pid, traffic_stop})
             end,
-            controller(TrafficPid, PedestrianPid, {Tstate, Pstate});
+            controller(TrafficPid, PedestrianPid, {Tstate, Pstate, Status});
 
         %% On recieving this signal, the controller changes the vehicular
         %% traffic is stopped and only pedestrain traffic is allowed for the
@@ -122,26 +132,27 @@ controller(TrafficPid, PedestrianPid, {Tstate, Pstate}) ->
         {Pid, traffic_stop} ->
             send_mesg(Pid, 'traffic light closed, pedestrian light open for 5'),
             timer:send_after(50000, self(), {Pid, pedestrian_stop}),
-            controller(TrafficPid, PedestrianPid, {red, green});
+            controller(TrafficPid, PedestrianPid, {red, green, request_lock});
 
         %% On recieving this signal, the controller stops allows pedestrian
         %% traffic for the last 2 minutes before reverting to normal state
         {Pid, pedestrian_stop} ->
             send_mesg(Pid, 'pedestrian about to close in 2'),
             timer:send_after(20000, self(), {Pid, normal}),
-            controller(TrafficPid, PedestrianPid, {red, green});
+            controller(TrafficPid, PedestrianPid, {red, green, request_lock});
 
         %% A catchall condition for errors
         _ ->
-            controller(TrafficPid, PedestrianPid, {Tstate, Pstate})
+            controller(TrafficPid, PedestrianPid, {Tstate, Pstate, Status})
     end.
 
 %% we spawn two processes,
 %% 1. TrafficPid
 %% 2. PedestrianPid
+%%
 %% The we call the controller with the Pid of these processes which listens for
 %% the various messages that will be sent to the process
 start() ->
     TraffiPid = spawn(fun () -> signal_light(green) end),
     PedestrianPid = spawn(fun () -> signal_light(green) end),
-    spawn(fun () -> controller(TraffiPid, PedestrianPid, {green, red}) end).
+    spawn(fun () -> controller(TraffiPid, PedestrianPid, {green, red, open}) end).
